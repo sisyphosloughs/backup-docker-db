@@ -1,0 +1,8 @@
+# Host-specific configuration and secrets — never commit
+global.conf
+stacks/*.conf
+# Templates stay versioned
+!*.conf.example
+
+# Runtime logs
+logs/

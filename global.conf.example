@@ -1,0 +1,93 @@
+# global.conf — host-specific global configuration for docker-db-dump.sh
+#
+# Copy to "global.conf" and adjust. Sourced by docker-db-dump.sh based on
+# SCRIPT_DIR (SCRIPT_DIR is available here). Holds the switches that apply to
+# the whole run; WHICH databases are dumped is defined per stack in
+# stacks/<name>.conf (see stacks/stacks.conf.example).
+#
+# This file may contain the Telegram token: chmod 600, owned by root.
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+# Base directory whose sub-directories are the Docker stacks. A stack
+# configuration without its own STACK_DIR is expected in
+# "$STACKS_BASE/<stack name>". Leave empty if every stacks/<name>.conf sets its
+# own STACK_DIR.
+STACKS_BASE="/opt/containers"
+
+# Staging directory (REQUIRED): all dumps are collected here, one
+# sub-directory per stack, and the backup host pulls exactly this directory
+# read-only. It must NOT lie inside STACKS_BASE (the dumps would otherwise end
+# up in the data set they were extracted from and be pulled twice).
+STAGING_DIR="/srv/db-staging"
+
+# Directory holding the per-stack configurations (default: stacks/ next to the
+# script). Rarely worth changing.
+# STACKS_DIR="$SCRIPT_DIR/stacks"
+
+# Name of the completion marker inside STAGING_DIR. This is the contract with
+# the pull side — only change it if the pull script is changed with it.
+MARKER_NAME=".complete"
+
+# ---------------------------------------------------------------------------
+# Retention
+# ---------------------------------------------------------------------------
+
+# How many days a dump is kept in the staging directory (default per stack; a
+# stacks/<name>.conf may override it with its own RETENTION_DAYS). Keep this
+# SHORT: the actual history lives in the restic repositories on the backup
+# side, staging only has to bridge the gap to the next pull. Do not go below 2
+# — an older dump is the fallback if a run fails.
+DUMP_RETENTION_DAYS=7
+
+# Log retention (days). The script rotates its own logs, no logrotate needed.
+LOG_RETENTION_DAYS=64
+
+# ---------------------------------------------------------------------------
+# Access for the pull side
+#
+# The dumps have to be readable for the backup host's read-only pull user, but
+# a SQL dump holds the entire database and must not become world-readable.
+# The intended setup: the pull user is a member of STAGING_GROUP; the staging
+# directories are 0750 and setgid, the dumps 0640 (DUMP_UMASK).
+# ---------------------------------------------------------------------------
+
+# Mode of STAGING_DIR and its per-stack sub-directories.
+STAGING_MODE="0750"
+
+# Group that may read the dumps (the pull user's group). Empty = leave group
+# ownership alone — then make sure the pull user can read the files some other
+# way.
+STAGING_GROUP=""
+# STAGING_GROUP="dbpull"
+
+# umask for the dump files. 0027 -> files 0640, directories 0750.
+DUMP_UMASK="0027"
+
+# ---------------------------------------------------------------------------
+# Docker
+# ---------------------------------------------------------------------------
+
+# Timeout for "docker compose stop" (seconds). Only relevant for stacks that
+# set STOP_SERVICES.
+DOCKER_STOP_TIMEOUT=20
+
+# ---------------------------------------------------------------------------
+# Binaries
+# ---------------------------------------------------------------------------
+
+# Directories prepended to PATH. cron starts with a minimal PATH, and on some
+# hosts (e.g. a NAS) docker or sqlite3 live in a non-standard location such as
+# /volume1/opt/bin. The programs actually needed are checked and logged at
+# startup.
+EXTRA_PATH=""
+# EXTRA_PATH="/usr/local/bin:/volume1/opt/bin"
+
+# ---------------------------------------------------------------------------
+# Telegram notification (leave empty/"xxx" to disable)
+# ---------------------------------------------------------------------------
+
+TELEGRAM_BOT_TOKEN="xxx"
+TELEGRAM_CHAT_ID="xxx"

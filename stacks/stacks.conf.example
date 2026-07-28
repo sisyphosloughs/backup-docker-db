@@ -1,0 +1,138 @@
+# stacks/<name>.conf — one file per stack whose database is dumped
+#
+# Copy this template to stacks/<name>.conf (e.g. stacks/nextcloud.conf) and
+# adjust. docker-db-dump.sh collects every "*.conf" in this directory; this
+# ".example" file is ignored. Adding a database therefore never requires a
+# change to the script.
+#
+# The FILE NAME (without ".conf") is the stack name. It is
+#   - the label in the log and in the Telegram summary,
+#   - the sub-directory under STAGING_DIR the dumps are written to
+#     (STAGING_DIR/<name>/dump-<timestamp>.sql),
+#   - and, unless STACK_DIR below says otherwise, the directory name under
+#     STACKS_BASE.
+#
+# Each file is sourced on its own with all variables below reset beforehand, so
+# values never leak between stacks. Leave a variable out to get its default.
+#
+# May contain a database password (DB_PASSWORD): chmod 600, owned by root.
+
+# ---------------------------------------------------------------------------
+# Which database (REQUIRED)
+#
+#   postgres  pg_dump inside the container (incl. postgres derivatives such as
+#             pgvector/pgvecto-rs/postgis/timescale)
+#   mariadb   mariadb-dump / mysqldump inside the container (also mysql,
+#             percona); dumped with --single-transaction --quick
+#   sqlite    no database server: the file lives on the host and is copied
+#             consistently with the host's sqlite3 ".backup" — see SQLITE_FILES
+#   custom    run the stack's own db-dump.sh (see examples/db-dump.custom.sh)
+# ---------------------------------------------------------------------------
+ENGINE="postgres"
+
+# Stack directory. Default: "$STACKS_BASE/<name>" from global.conf. Set it
+# explicitly for a stack that lives outside STACKS_BASE. The container is
+# resolved through "docker compose" FROM THIS DIRECTORY, so it must be the
+# directory holding the docker-compose.yml.
+# STACK_DIR="/opt/other/nextcloud"
+
+# Skip this stack without deleting its configuration (default true).
+# ENABLED=false
+
+# How many days this stack's dumps are kept in staging. Default:
+# DUMP_RETENTION_DAYS from global.conf.
+# RETENTION_DAYS=7
+
+# ---------------------------------------------------------------------------
+# Container selection (postgres / mariadb) — only needed if the autodetection
+# is wrong or ambiguous.
+#
+# By default the database container is auto-detected among the stack's running
+# compose containers: by image name, by the engine's exposed port (5432/3306)
+# or by its telltale environment variables — so derivatives that carry neither
+# "postgres" nor "maria" in the image name are found too. If a stack runs
+# SEVERAL databases, the autodetection reports the ambiguity and you pin one
+# here.
+#
+# DB_SERVICE is the compose SERVICE name (the key under "services:" in
+# docker-compose.yml), NOT a container_name:.
+# ---------------------------------------------------------------------------
+# DB_SERVICE="database"
+# DB_CONTAINER="my_postgres"      # raw container name/id, bypasses compose
+
+# ---------------------------------------------------------------------------
+# Credentials (postgres / mariadb) — usually NOT needed.
+#
+# They are resolved inside the container from the usual environment variables
+# and their _FILE (docker secret) variants: POSTGRES_USER/DB/PASSWORD,
+# MYSQL_ROOT_PASSWORD, MARIADB_ROOT_PASSWORD, … Set them here only if that
+# fails, e.g. because the dump user is not the container's default one.
+#
+# postgres: DB_NAME defaults to DB_USER, and pg_dump over the local socket
+#           usually needs no password at all.
+# mariadb:  DB_USER defaults to root; without DB_NAME the dump covers
+#           --all-databases.
+# ---------------------------------------------------------------------------
+# DB_USER="nextcloud"
+# DB_NAME="nextcloud"
+# DB_PASSWORD="…"
+
+# ---------------------------------------------------------------------------
+# SQLite (ENGINE=sqlite): one entry per database file. $STACK_DIR is available.
+# The online ".backup" produces a consistent copy even while the application
+# has the database open — stopping the app is not required (only a writer that
+# never pauses can starve the copy, see STOP_SERVICES).
+# ---------------------------------------------------------------------------
+SQLITE_FILES=(
+  # "$STACK_DIR/data/database.sqlite"
+  # "$STACK_DIR/data/another.sqlite"
+)
+
+# ---------------------------------------------------------------------------
+# Custom dump script (ENGINE=custom). Default: "$STACK_DIR/db-dump.sh".
+# It is run with STACK_NAME, STACK_DIR, DUMP_DIR, RETENTION_DAYS and
+# DB_DUMP_LIB in its environment, so it writes into the staging directory
+# without knowing anything about it. See examples/db-dump.custom.sh.
+# ---------------------------------------------------------------------------
+# DUMP_SCRIPT="/opt/containers/immich/db-dump.sh"
+
+# ---------------------------------------------------------------------------
+# Quiesce the writers for the dump (optional, default: nothing is stopped).
+#
+# What this does: it stops the listed compose services for the duration of the
+# dump, so nothing writes to the database while it is being read. Nothing more.
+#
+# What it does NOT do: it does not give you a matching file+database state.
+# This script only produces the DB dump; the backup host pulls the stack's
+# FILES later, in a separate step, when the application is long running again.
+# Whatever drifts apart between dump and pull drifts apart regardless of what
+# happens here. Real file/database consistency needs an atomic capture of the
+# files inside the same stopped window (LVM/ZFS/btrfs snapshot or a copy into
+# the staging directory) — that is a different job, not this switch.
+#
+# So leave this EMPTY unless one of these applies:
+#
+#   - MyISAM/Aria tables. "--single-transaction" only covers InnoDB, and the
+#     dump uses --all-databases, so MariaDB's own system tables are always in
+#     it. Rarely a problem in practice, but it is the one case where stopping
+#     changes anything for MariaDB.
+#   - SQLite under a busy writer. ".backup" is consistent online, but with a
+#     writer that never pauses it restarts and can end in SQLITE_BUSY.
+#   - ENGINE="custom" without an online dump: Redis, LevelDB/BoltDB and other
+#     embedded stores that are copied as files. Here stopping is the only
+#     correct option.
+#
+# NOT needed for plain postgres (pg_dump reads a REPEATABLE READ snapshot) or
+# for InnoDB-only MariaDB/MySQL. Stopping buys nothing there and costs downtime.
+#
+# IMPORTANT: for postgres/mariadb do NOT list the database service itself — it
+# has to be running to be dumped. List the application containers in front of
+# it. The services are started again on every exit path, including a failed
+# dump; a stack whose services could not be restarted counts as failed and
+# suppresses the completion marker, so a container left down never goes
+# unnoticed.
+# ---------------------------------------------------------------------------
+STOP_SERVICES=(
+  # "app"
+  # "worker"
+)
