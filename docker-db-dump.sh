@@ -21,7 +21,9 @@
 #                       change to this script
 #   lib/db-dump-lib.sh  vendored dump helpers (container autodetection,
 #                       credential resolution, retention) — see its header
-#   lib/common-lib.sh   logging / Telegram / small helpers
+#   lib/runlib/         the shared run skeleton (log file, error account, lock,
+#                       configuration loader, summary, notification, marker),
+#                       a git submodule shared with the other backup scripts
 # all relative to this script's directory. Needs docker access (run as root).
 # See README.md.
 
@@ -32,30 +34,15 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-START_EPOCH="$(date +%s)"
-HOSTNAME_SHORT="$(hostname -s 2>/dev/null || hostname)"
 
-# Set by finish()/the --list branch so the EXIT trap can tell a regular exit
-# from an unexpected abort.
-CLEAN_EXIT=0
-# Reference file touched at the start of the run; a dump file is "from this run"
-# exactly if it is newer (used for the per-stack sizes in the summary).
-RUN_REF=""
-
-# Per-stack records, index-parallel, filled by load_stacks()
-STACK_NAMES=()
-STACK_CONFS=()
+# Per-stack records, index-parallel with runlib's INSTANCE_NAMES/INSTANCE_CONFS.
+# They are appended by validate_stack() exactly when it accepts a stack, so the
+# indices stay aligned; dump_one_stack() reads them by index.
 STACK_ENGINES=()
 STACK_PATHS=()
 
-# Results of this run
-OK_STACKS=()
-STACK_RESULTS=()
-TOTAL_BYTES=0
-MARKER_NOTE="not written"
-
 # Which external programs the configured stacks actually need (set by
-# load_stacks, evaluated by check_binaries) — a host without SQLite stacks
+# validate_stack, evaluated by check_binaries) — a host without SQLite stacks
 # should not be nagged about a missing sqlite3.
 NEED_DOCKER=0
 NEED_SQLITE=0
@@ -103,19 +90,24 @@ done
 # ---------------------------------------------------------------------------
 # 3. Libraries
 #
-# Order matters. common-lib.sh first: it provides log_info/log_error (stdout +
-# log file). db-dump-lib.sh second, because it owns the bare log() that its own
-# helpers use for their stderr-only diagnostics — see the header of
-# common-lib.sh for why the two channels must stay apart.
+# Order matters. runlib first: it provides log_info/log_error (stdout + log
+# file) and everything the run skeleton needs. db-dump-lib.sh second, because it
+# owns the bare log() that its own helpers use for their stderr-only
+# diagnostics — see the header of runlib/log.sh for why the two channels must
+# stay apart.
 # ---------------------------------------------------------------------------
 
-COMMON_LIB="$SCRIPT_DIR/lib/common-lib.sh"
+RUNLIB="$SCRIPT_DIR/lib/runlib/runlib.sh"
 DB_DUMP_LIB="$SCRIPT_DIR/lib/db-dump-lib.sh"
-for lib_file in "$COMMON_LIB" "$DB_DUMP_LIB"; do
-  [[ -r "$lib_file" ]] || { echo "FATAL: library not readable: $lib_file" >&2; exit 1; }
+for lib_file in "$RUNLIB" "$DB_DUMP_LIB"; do
+  [[ -r "$lib_file" ]] || {
+    echo "FATAL: library not readable: $lib_file" >&2
+    echo "       (lib/runlib is a git submodule — run 'git submodule update --init')" >&2
+    exit 1
+  }
 done
-# shellcheck source=lib/common-lib.sh
-source "$COMMON_LIB"
+# shellcheck source=lib/runlib/runlib.sh
+source "$RUNLIB"
 
 # db-dump-lib.sh derives STACK_DIR/STACK_NAME/DUMP_DIR from the sourcing file at
 # source time. Pre-set them so that derivation is a harmless no-op: the real
@@ -135,11 +127,8 @@ source "$DB_DUMP_LIB"
 # ---------------------------------------------------------------------------
 
 LOG_DIR="$SCRIPT_DIR/logs"
-log_init "$LOG_DIR" "db-dump" \
+run_init "$LOG_DIR" "db-dump" \
   || { echo "FATAL: cannot create the log file in $LOG_DIR" >&2; exit 1; }
-
-RUN_REF="$LOG_DIR/.runref.$$"
-: > "$RUN_REF"
 
 # ---------------------------------------------------------------------------
 # 5. Configuration
@@ -168,6 +157,32 @@ source "$GLOBAL_CONF"
 MARKER_PATH="${STAGING_DIR%/}/${MARKER_NAME}"
 
 # ---------------------------------------------------------------------------
+# 5b. What this run calls things
+#
+# runlib runs the same skeleton for every script of the family; these are the
+# words that keep THIS script's log and notification its own.
+# ---------------------------------------------------------------------------
+
+# shellcheck disable=SC2034  # every name here is read by lib/runlib, not below.
+{
+  RUN_WHAT="DB dumps"
+  RUN_LOG_NAME="DB dump run"
+  RUN_UNIT="Stacks"
+  RUN_OK_VERB="DB dump successful"
+  RUN_ABORT_HINT="The staging directory is not consistent; the pull side must not use it."
+  RUN_USES_MARKER=1
+  INSTANCE_LABEL="Stack"
+  INSTANCE_LABEL_LC="stack"
+  INSTANCE_OPT="--stack"
+  # Set by the marker cascade below and rendered by runlib's run_finish.
+  MARKER_NOTE="not written"
+}
+
+# Telegram credentials: from TELEGRAM_CONF when global.conf points at one,
+# otherwise from global.conf itself.
+notify_init
+
+# ---------------------------------------------------------------------------
 # 6. trap handler
 #
 # Registered as soon as the Telegram credentials are known, so a configuration
@@ -175,61 +190,16 @@ MARKER_PATH="${STAGING_DIR%/}/${MARKER_NAME}"
 # cron. Nothing has to be rolled back at this level: a stack whose services were
 # stopped for a quiesced dump restarts them in its own EXIT trap (see
 # dump_one_stack).
-# ---------------------------------------------------------------------------
-
-cleanup() {
-  # cleanup [reason] — $? must be read before anything else runs.
-  local rc=$?
-  local reason="${1:-exit code $rc}"
-  # Only on an unexpected abort — a regular exit goes through finish().
-  [[ "$CLEAN_EXIT" -eq 1 ]] && return 0
-  # Set immediately: a signal handler ends in "exit", which runs the EXIT trap
-  # on its way out — without this guard the alarm would be sent twice.
-  CLEAN_EXIT=1
-
-  _log_emit "ERROR" "Unexpected abort ($reason) — the completion marker was NOT written"
-  telegram_send "$(printf '❌ [%s] DB dumps ABORTED\n\nThe staging directory is not consistent; the pull side must not use it.\n\n--- Log (last 50 lines) ---\n%s' \
-    "$HOSTNAME_SHORT" "$(log_tail)")"
-  [[ -n "$RUN_REF" ]] && rm -f "$RUN_REF"
-  return 0
-}
-
+#
 # On a signal, stop for real instead of resuming where the run was interrupted:
 # a half-dumped staging directory must not continue towards a completion marker.
-trap cleanup EXIT
-trap 'cleanup "interrupted (SIGINT)"; exit 130' INT
-trap 'cleanup "terminated (SIGTERM)"; exit 143' TERM
+# ---------------------------------------------------------------------------
+
+run_traps
 
 # ---------------------------------------------------------------------------
 # 7. Helper functions
 # ---------------------------------------------------------------------------
-
-acquire_lock() {
-  # A second run started while the first is still dumping would write into the
-  # same staging directory and could leave the marker claiming a half-finished
-  # state is complete. flock is advisory and free; where it does not exist the
-  # run continues (and says so) rather than refusing to work.
-  local lock_file="$LOG_DIR/.lock"
-  if ! command -v flock >/dev/null 2>&1; then
-    log_info "flock not available — running without a concurrency lock"
-    return 0
-  fi
-  # Checked before the exec: a redirection error on "exec" terminates a
-  # non-interactive shell outright, and a missing lock must not be fatal.
-  if ! touch "$lock_file" 2>/dev/null; then
-    log_info "Lock file not writable ($lock_file) — running without a concurrency lock"
-    return 0
-  fi
-  # Fixed descriptor 9 (used nowhere else) rather than the "{fd}>" form, which
-  # needs bash >= 4.1. The lock is held until the script exits and the
-  # descriptor is closed; append mode so the file is never truncated.
-  exec 9>>"$lock_file"
-  if ! flock -n 9; then
-    log_error "Another run is still in progress (lock: $lock_file) — aborting"
-    return 1
-  fi
-  return 0
-}
 
 prepare_staging_dir() {
   # prepare_staging_dir <dir> — create a staging directory and make it readable
@@ -248,97 +218,79 @@ prepare_staging_dir() {
   return 0
 }
 
-load_stacks() {
-  # One *.conf per stack in STACKS_DIR; the file name (without ".conf") is the
-  # stack name — it is the log label, the sub-directory under STAGING_DIR and,
-  # unless STACK_DIR says otherwise, the directory name under STACKS_BASE.
-  # Adding a stack therefore means adding a file, never touching this script.
+# shellcheck disable=SC2034  # DB_*/SQLITE_FILES are read by db-dump-lib.sh and
+# by the stack configurations sourced on top of them, not by this function.
+reset_stack_vars() {
+  # reset_stack_vars <name> — every per-stack variable, back to its default.
   #
-  # Each file is sourced on its own with the per-stack variables reset
-  # beforehand, so a value from one file never leaks into the next. Only the
-  # scalars needed for validation and the overview are kept here; dump_one_stack
-  # re-reads the file inside its subshell, where arrays such as SQLITE_FILES and
-  # the credentials cannot leak anywhere at all.
+  # Called in two places: by runlib's loader before each stacks/<name>.conf is
+  # sourced, and again inside the per-stack subshell before the same file is
+  # re-sourced. So a value from one file never leaks into the next, and both
+  # places start from the same documented state.
+  #
+  # These are plain globals ON PURPOSE (not "local"): the dump_* helpers of
+  # db-dump-lib.sh read them by name.
+  #
+  # STACK_DIR is pre-filled with the default derived from the name, so the
+  # configuration can already refer to "$STACK_DIR" (and still override it
+  # outright).
+  local name="${1:-}"
+  ENGINE=""
+  STACK_DIR="${STACKS_BASE:+${STACKS_BASE%/}/$name}"
+  ENABLED="true"
+  RETENTION_DAYS=""
+  DUMP_SCRIPT=""
+  DB_SERVICE=""
+  DB_CONTAINER=""
+  DB_USER=""
+  DB_NAME=""
+  DB_PASSWORD=""
+  SQLITE_FILES=()
+  STOP_SERVICES=()
+  STOPPED_SERVICES=()
+}
+
+validate_stack() {
+  # validate_stack <name> <conf> — runlib's per-object hook. The configuration
+  # has been sourced at this point, so ENGINE/STACK_DIR carry what it said.
   #
   # A configuration that cannot be used is an ERROR, not a silent skip: it ends
   # up in ERRORS and thus suppresses the completion marker. Only an explicit
-  # ENABLED=false is a deliberate skip.
-  local conf name found=0 sel
-  [[ -d "$STACKS_DIR" ]] || fatal "Stack configuration directory not found: $STACKS_DIR"
+  # ENABLED=false is a deliberate skip (runlib handles that).
+  local name="$1" conf="$2"
 
-  for conf in "$STACKS_DIR"/*.conf; do
-    [[ -e "$conf" ]] || continue                 # no *.conf present at all
-    case "$conf" in *.example) continue ;; esac  # skip templates (defensive)
-    name="${conf##*/}"; name="${name%.conf}"
-    found=$((found + 1))
+  case "$ENGINE" in
+    postgres)      NEED_DOCKER=1 ;;
+    mariadb|mysql) NEED_DOCKER=1 ;;
+    sqlite)        NEED_SQLITE=1 ;;
+    # custom: the stack's own db-dump.sh decides what it needs, so no
+    # requirement is inferred here.
+    custom)        ;;
+    "")  log_error "Stack '$name' ($conf): ENGINE not set — stack skipped"; return 1 ;;
+    *)   log_error "Stack '$name': unknown ENGINE '$ENGINE' (postgres|mariadb|sqlite|custom) — stack skipped"; return 1 ;;
+  esac
 
-    # --stack: restrict the run to the named stacks (no marker, see below).
-    if [[ "${#SELECTED_STACKS[@]}" -gt 0 ]] \
-       && ! contains "$name" "${SELECTED_STACKS[@]}"; then
-      continue
-    fi
+  if [[ -z "$STACK_DIR" ]]; then
+    log_error "Stack '$name': neither STACK_DIR (stack config) nor STACKS_BASE (global.conf) is set — stack skipped"
+    return 1
+  fi
+  if [[ ! -d "$STACK_DIR" ]]; then
+    log_error "Stack '$name': stack directory does not exist: $STACK_DIR — stack skipped"
+    return 1
+  fi
 
-    # Reset per-stack variables so nothing leaks between files. STACK_DIR is
-    # pre-filled with the default derived from the name, so the configuration
-    # can already refer to "$STACK_DIR" (and still override it outright).
-    local ENGINE="" ENABLED="true" RETENTION_DAYS="" DUMP_SCRIPT=""
-    local STACK_DIR="${STACKS_BASE:+${STACKS_BASE%/}/$name}"
-
-    # shellcheck source=/dev/null
-    if ! source "$conf"; then
-      log_error "Stack '$name': $conf could not be read — stack skipped"
-      continue
-    fi
-
-    if ! is_truthy "$ENABLED"; then
-      log_info "Stack '$name': ENABLED is not true — skipped on purpose"
-      continue
-    fi
-
-    case "$ENGINE" in
-      postgres)      NEED_DOCKER=1 ;;
-      mariadb|mysql) NEED_DOCKER=1 ;;
-      sqlite)        NEED_SQLITE=1 ;;
-      # custom: the stack's own db-dump.sh decides what it needs, so no
-      # requirement is inferred here.
-      custom)        ;;
-      "")  log_error "Stack '$name' ($conf): ENGINE not set — stack skipped"; continue ;;
-      *)   log_error "Stack '$name': unknown ENGINE '$ENGINE' (postgres|mariadb|sqlite|custom) — stack skipped"; continue ;;
-    esac
-
-    if [[ -z "$STACK_DIR" ]]; then
-      log_error "Stack '$name': neither STACK_DIR (stack config) nor STACKS_BASE (global.conf) is set — stack skipped"
-      continue
-    fi
-    if [[ ! -d "$STACK_DIR" ]]; then
-      log_error "Stack '$name': stack directory does not exist: $STACK_DIR — stack skipped"
-      continue
-    fi
-
-    STACK_NAMES+=("$name")
-    STACK_CONFS+=("$conf")
-    STACK_ENGINES+=("$ENGINE")
-    STACK_PATHS+=("$STACK_DIR")
-    log_info "Stack '$name': engine $ENGINE, directory $STACK_DIR, retention ${RETENTION_DAYS:-$DUMP_RETENTION_DAYS} days"
-  done
-
-  # A --stack name without a matching configuration is a typo, not an empty run.
-  for sel in "${SELECTED_STACKS[@]+"${SELECTED_STACKS[@]}"}"; do
-    contains "$sel" "${STACK_NAMES[@]+"${STACK_NAMES[@]}"}" \
-      || log_error "--stack '$sel': no usable configuration $STACKS_DIR/$sel.conf"
-  done
-
-  [[ "$found" -gt 0 ]] \
-    || fatal "No stack configurations (*.conf) found in $STACKS_DIR"
-  [[ "${#STACK_NAMES[@]}" -gt 0 ]] \
-    || fatal "No usable stack configuration in $STACKS_DIR"
+  STACK_ENGINES+=("$ENGINE")
+  STACK_PATHS+=("$STACK_DIR")
+  instances_record "${STAGING_DIR%/}/$name" "$name ($ENGINE)"
+  log_info "Stack '$name': engine $ENGINE, directory $STACK_DIR, retention ${RETENTION_DAYS:-$DUMP_RETENTION_DAYS} days"
+  return 0
 }
 
 check_binaries() {
   # Report the availability of the required programs at the very start, so a
   # missing or mislocated binary is obvious in the log instead of surfacing as a
   # cryptic failure halfway through. Which ones are required follows from the
-  # configured engines (see load_stacks).
+  # configured engines (see validate_stack).
   log_info "--- Checking programs ---"
   local p
 
@@ -362,38 +314,10 @@ check_binaries() {
     fi
   fi
 
-  if telegram_configured; then
-    if p="$(command -v curl 2>/dev/null)"; then
-      log_info "curl found: $p (Telegram notifications enabled)"
-    else
-      log_error "Telegram is configured, but curl not found — notifications will not be sent"
-    fi
-  fi
+  notify_check_binaries
 }
 
 # --- per-stack dump ---------------------------------------------------------
-
-# shellcheck disable=SC2034  # DB_*/SQLITE_FILES are read by db-dump-lib.sh and
-# by the stack configurations sourced on top of them, not by this function.
-reset_stack_vars() {
-  # Runs inside the per-stack subshell before its configuration is sourced.
-  # These are plain globals ON PURPOSE (not "local"): the dump_* helpers of
-  # db-dump-lib.sh read them by name, and inside a subshell there is nothing
-  # they could leak into.
-  ENGINE=""
-  STACK_DIR=""
-  ENABLED="true"
-  RETENTION_DAYS=""
-  DUMP_SCRIPT=""
-  DB_SERVICE=""
-  DB_CONTAINER=""
-  DB_USER=""
-  DB_NAME=""
-  DB_PASSWORD=""
-  SQLITE_FILES=()
-  STOP_SERVICES=()
-  STOPPED_SERVICES=()
-}
 
 stop_stack_services() {
   # Optional per-stack switch: stop the listed compose services so nothing
@@ -461,27 +385,26 @@ run_custom_dump() {
 }
 
 dump_one_stack() {
-  # dump_one_stack <name> <conf> <stack-dir>
+  # dump_one_stack <name> <conf> <index> — runlib's worker.
   #
   # Called on the LEFT side of a pipeline, i.e. in a SUBSHELL — deliberately:
   # the helpers of db-dump-lib.sh end a failed dump with "exit 1", which has to
-  # end THIS stack and not the whole run. The call site reads the status from
-  # PIPESTATUS[0] and tees the subshell's stdout+stderr (including the library's
-  # stderr diagnostics) into the log.
+  # end THIS stack and not the whole run.
   #
   # Inside here, logging therefore goes through the library's log() (stderr,
-  # captured by that pipe) — log_info/log_error belong to the run level, would
-  # be written to the log file a second time by the pipe, and could not report
+  # captured by that pipe); log_info/log_error belong to the run level, would be
+  # written to the log file a second time by the pipe, and could not report
   # anything back across the subshell boundary anyway.
-  local name="$1" conf="$2" stack_dir="$3" db_file rc=0
+  local name="$1" conf="$2" idx="$3" db_file rc=0
+  local stack_dir="${STACK_PATHS[$idx]}"
 
-  reset_stack_vars
+  reset_stack_vars "$name"
 
   # Context for db-dump-lib.sh, set BEFORE the configuration is sourced so it
   # can refer to "$STACK_DIR" (SQLITE_FILES, DUMP_SCRIPT). The value was already
-  # resolved by load_stacks, including a STACK_DIR the configuration sets
-  # itself. DUMP_DIR is what turns the reference repo's "dumps live next to
-  # their stack" into this concept's central staging tree.
+  # resolved by the loader, including a STACK_DIR the configuration sets itself.
+  # DUMP_DIR is what turns the reference repo's "dumps live next to their stack"
+  # into this concept's central staging tree.
   STACK_NAME="$name"
   STACK_DIR="$stack_dir"
   DUMP_DIR="${STAGING_DIR%/}/$name"
@@ -545,49 +468,6 @@ dump_one_stack() {
   exit "$rc"
 }
 
-# --- completion marker ------------------------------------------------------
-
-write_marker() {
-  # THE contract with the pull side. Written atomically (temp file + mv inside
-  # STAGING_DIR, i.e. the same filesystem) so the pull side never sees a
-  # half-written marker, and only after a completely error-free run.
-  #
-  # A failed run deliberately leaves an EXISTING older marker untouched instead
-  # of deleting it: the pull side judges by age, so it keeps seeing the old
-  # timestamp, still has yesterday's valid dumps, and raises the alarm as soon
-  # as its freshness threshold is exceeded. Deleting it would turn a single
-  # failed stack into a total backup outage.
-  local tmp="${MARKER_PATH}.tmp.$$"
-
-  # Get the dumps onto the disk before the marker claims they are there: after a
-  # crash the marker must never outlive the data it vouches for.
-  command -v sync >/dev/null 2>&1 && sync
-
-  if ! {
-    printf 'completed_at=%s\n'    "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-    printf 'completed_epoch=%s\n' "$(date +%s)"
-    printf 'host=%s\n'            "$HOSTNAME_SHORT"
-    printf 'stacks_ok=%d\n'       "${#OK_STACKS[@]}"
-    printf 'stacks_total=%d\n'    "${#STACK_NAMES[@]}"
-    printf 'dump_bytes=%s\n'      "$TOTAL_BYTES"
-    printf 'generator=%s\n'       "docker-db-dump"
-  } > "$tmp"; then
-    log_error "Completion marker could not be written: $tmp"
-    rm -f "$tmp"
-    return 1
-  fi
-
-  [[ -n "$STAGING_GROUP" ]] && chgrp "$STAGING_GROUP" "$tmp" 2>/dev/null
-
-  if ! mv -f "$tmp" "$MARKER_PATH"; then
-    log_error "Completion marker could not be moved into place: $MARKER_PATH"
-    rm -f "$tmp"
-    return 1
-  fi
-  log_info "Completion marker written: $MARKER_PATH"
-  return 0
-}
-
 # ---------------------------------------------------------------------------
 # 8. Start
 # ---------------------------------------------------------------------------
@@ -604,21 +484,20 @@ if [[ -n "$EXTRA_PATH" ]]; then
   log_info "PATH extended by EXTRA_PATH: $EXTRA_PATH"
 fi
 
-load_stacks
+instances_load "$STACKS_DIR" reset_stack_vars validate_stack \
+  "${SELECTED_STACKS[@]+"${SELECTED_STACKS[@]}"}"
 
 if [[ "$ACTION" == "list" ]]; then
-  log_info "--- Configured stacks (${#STACK_NAMES[@]}) ---"
-  for idx in "${!STACK_NAMES[@]}"; do
-    log_plain "  ${STACK_NAMES[$idx]}  engine=${STACK_ENGINES[$idx]}  dir=${STACK_PATHS[$idx]}  staging=${STAGING_DIR%/}/${STACK_NAMES[$idx]}"
+  log_info "--- Configured stacks (${#INSTANCE_NAMES[@]}) ---"
+  for idx in "${!INSTANCE_NAMES[@]}"; do
+    log_plain "  ${INSTANCE_NAMES[$idx]}  engine=${STACK_ENGINES[$idx]}  dir=${STACK_PATHS[$idx]}  staging=${STAGING_DIR%/}/${INSTANCE_NAMES[$idx]}"
   done
-  CLEAN_EXIT=1
-  rm -f "$RUN_REF"
-  exit 0
+  run_end 0
 fi
 
 check_binaries
 
-acquire_lock || { CLEAN_EXIT=1; rm -f "$RUN_REF"; exit 1; }
+acquire_lock || run_end 1
 
 # Dumps are written with 0640 / directories 0750 (DUMP_UMASK): a SQL dump holds
 # the entire database, so it must not be world-readable just because the pull
@@ -632,8 +511,9 @@ log_info "Staging directory: $STAGING_DIR (mode $STAGING_MODE${STAGING_GROUP:+, 
 
 # Staging inside the stack tree would make the pull side see every dump twice
 # (once in the stack directory it may also pull, once in staging) and would put
-# the dumps back into the data set they were extracted from.
-if [[ -n "$STACKS_BASE" && "${STAGING_DIR%/}/" == "${STACKS_BASE%/}/"* ]]; then
+# the dumps back into the data set they were extracted from. is_inside (runlib)
+# normalises both paths first, so a relative path or a "/../" cannot slip past.
+if [[ -n "$STACKS_BASE" ]] && is_inside "$STAGING_DIR" "$STACKS_BASE"; then
   log_warn "STAGING_DIR lies inside STACKS_BASE ($STACKS_BASE) — the pull side would see the dumps twice"
 fi
 
@@ -646,36 +526,16 @@ fi
 # ---------------------------------------------------------------------------
 
 log_info "--- DB dumps ---"
-for idx in "${!STACK_NAMES[@]}"; do
-  stack_name="${STACK_NAMES[$idx]}"
-  stack_conf="${STACK_CONFS[$idx]}"
-  stack_engine="${STACK_ENGINES[$idx]}"
-  stack_start="$(date +%s)"
-
-  # The subshell (left of the pipe) isolates the library's "exit 1"; the pipe
-  # merges its stdout and stderr into terminal and log file in one place, so the
-  # dump details are visible live on a manual run and not just in the file.
-  dump_one_stack "$stack_name" "$stack_conf" "${STACK_PATHS[$idx]}" 2>&1 | tee -a "$LOG_FILE"
-  rc="${PIPESTATUS[0]}"
-
-  stack_bytes="$(bytes_newer_than "${STAGING_DIR%/}/$stack_name" "$RUN_REF")"
-  stack_dur="$(human_duration "$(( $(date +%s) - stack_start ))")"
-
-  if [[ "$rc" -eq 0 ]]; then
-    TOTAL_BYTES=$((TOTAL_BYTES + stack_bytes))
-    OK_STACKS+=("$stack_name")
-    STACK_RESULTS+=("$stack_name ($stack_engine): ok — $(human_bytes "$stack_bytes") in $stack_dur")
-    log_info "$stack_name: DB dump successful ($(human_bytes "$stack_bytes"), $stack_dur)"
-  else
-    STACK_RESULTS+=("$stack_name ($stack_engine): FAILED (exit $rc)")
-    log_error "$stack_name: failed (exit $rc) — see the details above"
-  fi
-done
+run_worker_loop dump_one_stack
 
 # ---------------------------------------------------------------------------
 # 10. Completion marker
+#
+# MARKER_NOTE is the one value this section produces: runlib's run_finish puts
+# it into the closing log line and the notification.
 # ---------------------------------------------------------------------------
 
+# shellcheck disable=SC2034  # MARKER_NOTE is read by lib/runlib's run_finish.
 if [[ "${#ERRORS[@]}" -gt 0 ]]; then
   # _log_emit, not log_error: every one of those errors is already recorded —
   # this line only states the consequence and must not inflate the count.
@@ -685,7 +545,10 @@ elif [[ "${#SELECTED_STACKS[@]}" -gt 0 ]]; then
   log_info "Partial run — completion marker deliberately not written (an existing one is left untouched)"
   MARKER_NOTE="not written (partial run) — an existing marker still applies"
 else
-  if write_marker; then
+  if write_marker "$MARKER_PATH" "$STAGING_GROUP" "docker-db-dump" \
+       "stacks_ok=${#OK_INSTANCES[@]}" \
+       "stacks_total=${#INSTANCE_NAMES[@]}" \
+       "dump_bytes=$TOTAL_BYTES"; then
     MARKER_NOTE="written ($MARKER_PATH)"
   else
     MARKER_NOTE="NOT written — writing it failed"
@@ -696,50 +559,4 @@ fi
 # 11. Completion
 # ---------------------------------------------------------------------------
 
-finish() {
-  local end_epoch duration_s duration_h err_count total ok results="" r e msg
-
-  end_epoch="$(date +%s)"
-  duration_s="$((end_epoch - START_EPOCH))"
-  duration_h="$(human_duration "$duration_s")"
-  err_count="${#ERRORS[@]}"
-  total="${#STACK_NAMES[@]}"
-  ok="${#OK_STACKS[@]}"
-
-  log_info "--- Summary ---"
-  for r in "${STACK_RESULTS[@]+"${STACK_RESULTS[@]}"}"; do
-    log_plain "  - $r"
-    results+="  - ${r}"$'\n'
-  done
-  if [[ "$err_count" -gt 0 ]]; then
-    log_info "Recorded errors ($err_count):"
-    for e in "${ERRORS[@]}"; do
-      log_plain "  - $e"
-    done
-  fi
-
-  log_info "DB dump run completed. $err_count errors. Duration: $duration_h. Marker: $MARKER_NOTE"
-
-  if [[ "$err_count" -eq 0 ]]; then
-    msg="$(printf '✅ [%s] DB dumps completed\nDuration: %s\nStacks: %d/%d successful\nData: %s\nMarker: %s\n\n%s' \
-      "$HOSTNAME_SHORT" "$duration_h" "$ok" "$total" "$(human_bytes "$TOTAL_BYTES")" \
-      "$MARKER_NOTE" "$results")"
-  else
-    msg="$(printf '❌ [%s] DB dumps completed with errors\nDuration: %s\nStacks: %d/%d successful\nErrors: %d\nMarker: %s\n\n%s\n--- Log (last 50 lines) ---\n%s' \
-      "$HOSTNAME_SHORT" "$duration_h" "$ok" "$total" "$err_count" \
-      "$MARKER_NOTE" "$results" "$(log_tail)")"
-  fi
-  telegram_send "$msg"
-
-  CLEAN_EXIT=1
-  rm -f "$RUN_REF"
-
-  # Exit code 0 ONLY on a completely successful run — that is what the caller
-  # (cron, a monitoring wrapper) evaluates.
-  if [[ "$err_count" -gt 0 ]]; then
-    exit 1
-  fi
-  exit 0
-}
-
-finish
+run_finish
