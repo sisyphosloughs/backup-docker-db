@@ -47,6 +47,20 @@ log() {
   printf '%s %-7s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "[${level}]" "$*" >&2
 }
 
+# The dump commands are run through runlib's cmd_run, which logs the argument
+# vector it executes and redacts credentials in it. runlib is NOT available when
+# a stack's db-dump.sh is run by hand (the standalone case this library keeps
+# supporting), so a minimal stand-in is defined THEN AND ONLY THEN — overwriting
+# the real one would silently drop the redaction.
+if ! declare -F cmd_run >/dev/null 2>&1; then
+  cmd_run() { log INFO "$*"; "$@"; }
+fi
+if ! declare -F cmd_quote >/dev/null 2>&1; then
+  # Always quoting is correct, just less pretty than runlib's quote-if-needed.
+  # shellcheck disable=SC1003  # bs is ONE backslash, not an escape
+  cmd_quote() { local s="$1" q="'" bs='\'; printf "'%s'" "${s//$q/${q}${bs}${q}${q}}"; }
+fi
+
 _dump_ts() { date +%Y-%m-%dT%H-%M-%S; }
 
 dump_prepare() {
@@ -203,31 +217,67 @@ _finalize_dump() {
   log INFO "${STACK_NAME}: ${label} dump written: $target"
 }
 
+# The identity a dump connects as (user, database, which dump binary exists)
+# is only knowable INSIDE the container: it comes from the image's environment,
+# from _FILE secret variants, or from image defaults. So it is resolved there
+# first and read back — identifiers only. The PASSWORD deliberately stays in
+# the container: putting it on the host's command line would expose it in the
+# process table ("ps -eo args") to every user on the machine.
+#
+# The dump itself is then a SINGLE line that resolves only the password, with
+# the identifiers substituted in. That is what makes the logged command the
+# executed command AND something you can paste into a shell: nothing is elided
+# and nothing is reconstructed.
+_resolve_identity() {
+  # _resolve_identity <cid> <script> — run <script> in the container and return
+  # its lines. Fails loudly; the caller must not dump with half an identity.
+  local cid="$1" script="$2" out
+  out="$(docker exec \
+      -e OVR_USER="${DB_USER:-}" -e OVR_DB="${DB_NAME:-}" \
+      "$cid" sh -c "$script")" || return 1
+  printf '%s\n' "$out"
+}
+
 dump_postgres() {
   # dump_postgres [service]
   # Auto-detects the postgres container in this stack's compose project (override
   # with DB_SERVICE or DB_CONTAINER) and streams a plain-SQL dump into db-dumps/
   # on the host. No bind mount or docker-compose.yml change is required.
   #
-  # Credentials are resolved INSIDE the container, trying common env vars and
-  # their _FILE secret variants. Optional host overrides: DB_USER, DB_NAME,
-  # DB_PASSWORD (passed in as OVR_* and taking precedence). pg_dump over the
+  # Optional host overrides: DB_USER, DB_NAME, DB_PASSWORD. pg_dump over the
   # local socket usually needs no password (trust/peer), so an empty password is
   # fine; PGPASSWORD/POSTGRES_PASSWORD(_FILE) are honoured if present.
-  local service="${1:-}" cid ts target rc=0
+  local service="${1:-}" cid ts target ident u d script rc=0
+  local pw_args=()
   cid="$(_resolve_container postgres "$service")" || exit 1
-  ts="$(_dump_ts)"; target="$DUMP_DIR/dump-${ts}.sql"
-  # "|| rc=$?" keeps a failing dump from tripping `set -e` before _finalize_dump
-  # can clean up the (possibly empty) target and log the failure.
-  docker exec \
-      -e OVR_USER="${DB_USER:-}" -e OVR_DB="${DB_NAME:-}" -e OVR_PW="${DB_PASSWORD:-}" \
-      "$cid" sh -c '
+
+  # shellcheck disable=SC2016  # expanded by the shell INSIDE the container
+  ident="$(_resolve_identity "$cid" '
+        command -v pg_dump >/dev/null 2>&1 || { echo "pg_dump not found in container" >&2; exit 127; }
         U="${OVR_USER:-}"; [ -z "$U" ] && [ -n "${POSTGRES_USER_FILE:-}" ] && U="$(cat "$POSTGRES_USER_FILE")"; [ -z "$U" ] && U="${POSTGRES_USER:-postgres}"
         D="${OVR_DB:-}";   [ -z "$D" ] && [ -n "${POSTGRES_DB_FILE:-}" ]   && D="$(cat "$POSTGRES_DB_FILE")";   [ -z "$D" ] && D="${POSTGRES_DB:-$U}"
-        P="${OVR_PW:-}";   [ -z "$P" ] && P="${PGPASSWORD:-}"; [ -z "$P" ] && [ -n "${POSTGRES_PASSWORD_FILE:-}" ] && P="$(cat "$POSTGRES_PASSWORD_FILE")"; [ -z "$P" ] && P="${POSTGRES_PASSWORD:-}"
-        command -v pg_dump >/dev/null 2>&1 || { echo "pg_dump not found in container" >&2; exit 127; }
-        export PGPASSWORD="$P"; exec pg_dump -U "$U" "$D"
-      ' > "$target" || rc=$?
+        printf "%s\n%s\n" "$U" "$D"
+      ')" || { log ERROR "${STACK_NAME}: could not resolve the PostgreSQL user/database in ${cid}"; exit 1; }
+  u="$(printf '%s\n' "$ident" | sed -n 1p)"
+  d="$(printf '%s\n' "$ident" | sed -n 2p)"
+  [[ -n "$u" && -n "$d" ]] \
+    || { log ERROR "${STACK_NAME}: empty PostgreSQL user or database resolved in ${cid}"; exit 1; }
+
+  # Password precedence, unchanged: DB_PASSWORD (as OVR_PW) -> PGPASSWORD ->
+  # POSTGRES_PASSWORD_FILE -> POSTGRES_PASSWORD.
+  # shellcheck disable=SC2016  # expanded by the shell INSIDE the container
+  script='P="${OVR_PW:-}"; [ -z "$P" ] && P="${PGPASSWORD:-}"; [ -z "$P" ] && [ -n "${POSTGRES_PASSWORD_FILE:-}" ] && P="$(cat "$POSTGRES_PASSWORD_FILE")"; [ -z "$P" ] && P="${POSTGRES_PASSWORD:-}"; export PGPASSWORD="$P"'
+  script="${script}; exec pg_dump -U $(cmd_quote "$u") $(cmd_quote "$d")"
+  # Only passed when there IS a host override, so the common line carries no
+  # redacted argument and can be pasted as printed.
+  [[ -n "${DB_PASSWORD:-}" ]] && pw_args=(-e "OVR_PW=${DB_PASSWORD}")
+
+  ts="$(_dump_ts)"; target="$DUMP_DIR/dump-${ts}.sql"
+  # "|| rc=$?" keeps a failing dump from tripping `set -e` before _finalize_dump
+  # can clean up the (possibly empty) target and log the failure. ">" applies to
+  # the dump stream, not to the logged line: cmd_run writes to stderr only.
+  CMD_PREFIX="${STACK_NAME}: " cmd_run docker exec \
+      "${pw_args[@]+"${pw_args[@]}"}" "$cid" sh -c "$script" > "$target" || rc=$?
   _finalize_dump "$rc" "$target" "PostgreSQL" "$cid"
 }
 
@@ -239,26 +289,41 @@ dump_mariadb() {
   # MYSQL_PWD to keep it off the process arg list. --single-transaction --quick
   # gives a consistent live-DB dump. Optional host overrides: DB_USER (default
   # root), DB_NAME (single DB instead of --all-databases), DB_PASSWORD.
-  local service="${1:-}" cid ts target rc=0
+  local service="${1:-}" cid ts target ident u dump script rc=0
+  local pw_args=()
   cid="$(_resolve_container mysql "$service")" || exit 1
-  ts="$(_dump_ts)"; target="$DUMP_DIR/dump-${ts}.sql"
-  # "|| rc=$?" keeps a failing dump from tripping `set -e` before _finalize_dump
-  # can clean up the (possibly empty) target and log the failure.
-  docker exec \
-      -e OVR_USER="${DB_USER:-}" -e OVR_DB="${DB_NAME:-}" -e OVR_PW="${DB_PASSWORD:-}" \
-      "$cid" sh -c '
-        U="${OVR_USER:-root}"
-        P="${OVR_PW:-}"
-        [ -z "$P" ] && [ -n "${MYSQL_ROOT_PASSWORD_FILE:-}" ]   && P="$(cat "$MYSQL_ROOT_PASSWORD_FILE")"
-        [ -z "$P" ] && [ -n "${MARIADB_ROOT_PASSWORD_FILE:-}" ] && P="$(cat "$MARIADB_ROOT_PASSWORD_FILE")"
-        [ -z "$P" ] && P="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}"
+
+  # Which binary exists is a property of the image, so it is resolved in the
+  # container together with the user.
+  # shellcheck disable=SC2016  # expanded by the shell INSIDE the container
+  ident="$(_resolve_identity "$cid" '
         if   command -v mariadb-dump >/dev/null 2>&1; then DUMP=mariadb-dump
         elif command -v mysqldump   >/dev/null 2>&1; then DUMP=mysqldump
         else echo "neither mariadb-dump nor mysqldump found in container" >&2; exit 127; fi
-        [ -n "$P" ] && export MYSQL_PWD="$P"
-        if [ -n "${OVR_DB:-}" ]; then exec "$DUMP" -u "$U" --single-transaction --quick "$OVR_DB"
-        else exec "$DUMP" -u "$U" --single-transaction --quick --all-databases; fi
-      ' > "$target" || rc=$?
+        printf "%s\n%s\n" "${OVR_USER:-root}" "$DUMP"
+      ')" || { log ERROR "${STACK_NAME}: could not resolve the MariaDB/MySQL user or dump binary in ${cid}"; exit 1; }
+  u="$(printf '%s\n' "$ident" | sed -n 1p)"
+  dump="$(printf '%s\n' "$ident" | sed -n 2p)"
+  [[ -n "$u" && -n "$dump" ]] \
+    || { log ERROR "${STACK_NAME}: empty MariaDB/MySQL user or dump binary resolved in ${cid}"; exit 1; }
+
+  # Password precedence, unchanged: DB_PASSWORD (as OVR_PW) ->
+  # MYSQL_ROOT_PASSWORD_FILE -> MARIADB_ROOT_PASSWORD_FILE ->
+  # MYSQL_ROOT_PASSWORD -> MARIADB_ROOT_PASSWORD.
+  # shellcheck disable=SC2016  # expanded by the shell INSIDE the container
+  script='P="${OVR_PW:-}"; [ -z "$P" ] && [ -n "${MYSQL_ROOT_PASSWORD_FILE:-}" ] && P="$(cat "$MYSQL_ROOT_PASSWORD_FILE")"; [ -z "$P" ] && [ -n "${MARIADB_ROOT_PASSWORD_FILE:-}" ] && P="$(cat "$MARIADB_ROOT_PASSWORD_FILE")"; [ -z "$P" ] && P="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}"; [ -n "$P" ] && export MYSQL_PWD="$P"'
+  if [[ -n "${DB_NAME:-}" ]]; then
+    script="${script}; exec $(cmd_quote "$dump") -u $(cmd_quote "$u") --single-transaction --quick $(cmd_quote "$DB_NAME")"
+  else
+    script="${script}; exec $(cmd_quote "$dump") -u $(cmd_quote "$u") --single-transaction --quick --all-databases"
+  fi
+  [[ -n "${DB_PASSWORD:-}" ]] && pw_args=(-e "OVR_PW=${DB_PASSWORD}")
+
+  ts="$(_dump_ts)"; target="$DUMP_DIR/dump-${ts}.sql"
+  # "|| rc=$?" keeps a failing dump from tripping `set -e` before _finalize_dump
+  # can clean up the (possibly empty) target and log the failure.
+  CMD_PREFIX="${STACK_NAME}: " cmd_run docker exec \
+      "${pw_args[@]+"${pw_args[@]}"}" "$cid" sh -c "$script" > "$target" || rc=$?
   _finalize_dump "$rc" "$target" "MariaDB/MySQL" "$cid"
 }
 
@@ -277,7 +342,7 @@ dump_sqlite() {
   name="$(basename "$db_file")"
   ts="$(_dump_ts)"
   target="$DUMP_DIR/${name%.*}-$ts.${name##*.}"
-  if sqlite3 "$db_file" ".backup '$target'"; then
+  if CMD_PREFIX="${STACK_NAME}: " cmd_run sqlite3 "$db_file" ".backup '$target'"; then
     log INFO "${STACK_NAME}: SQLite backup written: $target"
   else
     log ERROR "${STACK_NAME}: sqlite3 .backup failed for $db_file"; exit 1
