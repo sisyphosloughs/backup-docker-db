@@ -17,7 +17,7 @@
 #
 # Nothing is hard-coded here; every path, stack and switch comes from:
 #   global.conf         run-wide switches (paths, retention, Telegram, …)
-#   stacks/<name>.conf  one file per stack to dump — a new stack needs no
+#   instances/<name>.conf  one file per stack to dump — a new stack needs no
 #                       change to this script
 #   lib/db-dump-lib.sh  vendored dump helpers (container autodetection,
 #                       credential resolution, retention) — see its header
@@ -61,15 +61,15 @@ usage() {
   cat <<'EOF'
 Usage: docker-db-dump.sh [options]
 
-Dumps the databases of the stacks configured in stacks/*.conf into STAGING_DIR
+Dumps the databases of the stacks configured in instances/*.conf into STAGING_DIR
 and writes the completion marker when every one of them succeeded.
 
 Options:
-  -s, --stack NAME   Dump only this stack (repeatable). A partial run NEVER
-                     writes the completion marker — use it for testing a new
-                     stacks/<name>.conf, not for scheduled runs.
-  -l, --list         List the configured stacks and exit.
-  -h, --help         Show this help and exit.
+  -i, --instance NAME  Dump only this stack (repeatable). A partial run NEVER
+                       writes the completion marker — use it for testing a new
+                       instances/<name>.conf, not for scheduled runs.
+  -l, --list           List the configured stacks and exit.
+  -h, --help           Show this help and exit.
 
 Exit code: 0 only if the run was completely error-free.
 EOF
@@ -79,10 +79,12 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     -l|--list) ACTION="list"; shift ;;
-    -s|--stack)
-      [[ $# -ge 2 ]] || { echo "FATAL: --stack requires a stack name" >&2; exit 2; }
+    # "--stack" stays as an undocumented alias: it is what every note and
+    # muscle memory on the host still says.
+    -i|--instance|-s|--stack)
+      [[ $# -ge 2 ]] || { echo "FATAL: $1 requires a stack name" >&2; exit 2; }
       SELECTED_STACKS+=("$2"); shift 2 ;;
-    --stack=*) SELECTED_STACKS+=("${1#*=}"); shift ;;
+    --instance=*|--stack=*) SELECTED_STACKS+=("${1#*=}"); shift ;;
     *) echo "FATAL: unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
@@ -143,7 +145,7 @@ source "$GLOBAL_CONF"
 # Optional values: ":=" only assigns when unset or empty, so anything set in
 # global.conf always wins.
 : "${STACKS_BASE:=}"
-: "${STACKS_DIR:=$SCRIPT_DIR/stacks}"
+: "${INSTANCES_DIR:=$SCRIPT_DIR/instances}"
 : "${MARKER_NAME:=.complete}"
 : "${DUMP_RETENTION_DAYS:=7}"
 : "${DUMP_KEEP_MIN:=2}"
@@ -174,7 +176,7 @@ MARKER_PATH="${STAGING_DIR%/}/${MARKER_NAME}"
   RUN_USES_MARKER=1
   INSTANCE_LABEL="Stack"
   INSTANCE_LABEL_LC="stack"
-  INSTANCE_OPT="--stack"
+  INSTANCE_OPT="--instance"
   # Set by the marker cascade below and rendered by runlib's run_finish.
   MARKER_NOTE="not written"
 }
@@ -224,7 +226,7 @@ prepare_staging_dir() {
 reset_stack_vars() {
   # reset_stack_vars <name> — every per-stack variable, back to its default.
   #
-  # Called in two places: by runlib's loader before each stacks/<name>.conf is
+  # Called in two places: by runlib's loader before each instances/<name>.conf is
   # sourced, and again inside the per-stack subshell before the same file is
   # re-sourced. So a value from one file never leaks into the next, and both
   # places start from the same documented state.
@@ -487,7 +489,7 @@ if [[ -n "$EXTRA_PATH" ]]; then
   log_info "PATH extended by EXTRA_PATH: $EXTRA_PATH"
 fi
 
-instances_load "$STACKS_DIR" reset_stack_vars validate_stack \
+instances_load "$INSTANCES_DIR" reset_stack_vars validate_stack \
   "${SELECTED_STACKS[@]+"${SELECTED_STACKS[@]}"}"
 
 if [[ "$ACTION" == "list" ]]; then
@@ -521,7 +523,7 @@ if [[ -n "$STACKS_BASE" ]] && is_inside "$STAGING_DIR" "$STACKS_BASE"; then
 fi
 
 if [[ "${#SELECTED_STACKS[@]}" -gt 0 ]]; then
-  log_warn "Partial run (--stack ${SELECTED_STACKS[*]}) — the completion marker will NOT be written"
+  log_warn "Partial run (--instance ${SELECTED_STACKS[*]}) — the completion marker will NOT be written"
 fi
 
 # ---------------------------------------------------------------------------

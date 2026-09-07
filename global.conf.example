@@ -3,7 +3,7 @@
 # Copy to "global.conf" and adjust. Sourced by docker-db-dump.sh based on
 # SCRIPT_DIR (SCRIPT_DIR is available here). Holds the switches that apply to
 # the whole run; WHICH databases are dumped is defined per stack in
-# stacks/<name>.conf (see stacks/stacks.conf.example).
+# instances/<name>.conf (see instances/stacks.conf.example).
 #
 # This file may contain the Telegram token: chmod 600, owned by root.
 
@@ -13,7 +13,7 @@
 
 # Base directory whose sub-directories are the Docker stacks. A stack
 # configuration without its own STACK_DIR is expected in
-# "$STACKS_BASE/<stack name>". Leave empty if every stacks/<name>.conf sets its
+# "$STACKS_BASE/<stack name>". Leave empty if every instances/<name>.conf sets its
 # own STACK_DIR.
 STACKS_BASE="/opt/containers"
 
@@ -23,9 +23,9 @@ STACKS_BASE="/opt/containers"
 # up in the data set they were extracted from and be pulled twice).
 STAGING_DIR="/srv/db-staging"
 
-# Directory holding the per-stack configurations (default: stacks/ next to the
+# Directory holding the per-stack configurations (default: instances/ next to the
 # script). Rarely worth changing.
-# STACKS_DIR="$SCRIPT_DIR/stacks"
+# INSTANCES_DIR="$SCRIPT_DIR/instances"
 
 # Name of the completion marker inside STAGING_DIR. This is the contract with
 # the pull side — only change it if the pull script is changed with it.
@@ -36,7 +36,7 @@ MARKER_NAME=".complete"
 # ---------------------------------------------------------------------------
 
 # How many days a dump is kept in the staging directory (default per stack; a
-# stacks/<name>.conf may override it with its own RETENTION_DAYS). Keep this
+# instances/<name>.conf may override it with its own RETENTION_DAYS). Keep this
 # SHORT: the actual history lives in the restic repositories on the backup
 # side, staging only has to bridge the gap to the next pull. Do not go below 2
 # — an older dump is the fallback if a run fails.
@@ -45,7 +45,7 @@ DUMP_RETENTION_DAYS=7
 # Minimum number of dumps to keep per database, regardless of age. Without it a
 # stack that was down (or whose dump kept failing) would have all its files
 # expire on the same day and be left with nothing. A stack may override this
-# with KEEP_MIN in its own stacks/<name>.conf.
+# with KEEP_MIN in its own instances/<name>.conf.
 DUMP_KEEP_MIN=2
 
 # Log retention (days). The script rotates its own logs, no logrotate needed.

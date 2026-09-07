@@ -28,11 +28,11 @@ be weakened anywhere — no "let's just push it directly, it's simpler".
 <location>/
 ├── docker-db-dump.sh          # the script (identical on all hosts)
 ├── global.conf                # host-specific global config (from global.conf.example)
-├── stacks/                    # one *.conf per stack whose database is dumped
-│   ├── stacks.conf.example    # template for a stack
+├── instances/                 # one *.conf per stack whose database is dumped
+│   ├── instances.conf.example # template for a stack
 │   └── <name>.conf            # e.g. nextcloud.conf, immich.conf
 ├── lib/
-│   ├── db-dump-lib.sh         # vendored dump helpers (see "Relationship to restic-docker-backup")
+│   ├── db-dump-lib.sh         # dump helpers: container autodetection, credentials, retention
 │   └── runlib/                # shared run skeleton — git submodule, see below
 ├── examples/
 │   └── db-dump.custom.sh      # template for a stack with ENGINE="custom"
@@ -46,7 +46,7 @@ the location is freely choosable (e.g. `/opt/docker-db-dump`).
 ## The shared library
 
 The per-run log file, the error account that decides the exit code, the flock,
-the `stacks/*.conf` loader, the summary and the Telegram notification are not
+the `instances/*.conf` loader, the summary and the Telegram notification are not
 implemented here. They live in
 [runlib](https://github.com/sisyphosloughs/runlib) and are pulled in as a git
 submodule at `lib/runlib/`, so every script of the family runs the same code and
@@ -68,7 +68,7 @@ git add lib/runlib && git commit -m "runlib: update"
 
 ## What a run does
 
-1. Read `global.conf` and every `stacks/*.conf`, validate them, check that the
+1. Read `global.conf` and every `instances/*.conf`, validate them, check that the
    programs the configured engines need are actually there.
 2. Take a concurrency lock (`flock`), so two overlapping cron runs cannot write
    into the same staging directory.
@@ -122,7 +122,7 @@ in the reference repository:
 |---|---|---|
 | `STAGING_DIR` | — (required) | Where the dumps are collected and the backup host pulls from. |
 | `STACKS_BASE` | empty | Base directory whose sub-directories are the stacks. A stack without its own `STACK_DIR` is expected in `$STACKS_BASE/<name>`. |
-| `STACKS_DIR` | `stacks/` next to the script | Where the per-stack configurations live. |
+| `INSTANCES_DIR` | `instances/` next to the script | Where the per-stack configurations live. |
 | `MARKER_NAME` | `.complete` | Name of the marker inside `STAGING_DIR` — the contract with the pull side. |
 | `DUMP_RETENTION_DAYS` | `7` | Default retention of the dumps in staging (per stack overridable). |
 | `LOG_RETENTION_DAYS` | `64` | Log retention; the script rotates its own logs, no logrotate needed. |
@@ -133,7 +133,7 @@ in the reference repository:
 | `EXTRA_PATH` | empty | Directories prepended to `PATH` (cron has a minimal one). |
 | `TELEGRAM_CONF` | empty | Path to the file holding `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for the whole host (0600, outside every repo). Setting the two directly in `global.conf` still wins; leaving both unset disables notifications. |
 
-### `stacks/<name>.conf` — one file per database
+### `instances/<name>.conf` — one file per database
 
 Adding a database means **adding a file**, never editing the script. The file
 name (without `.conf`) is the stack name: the label in the log, the
@@ -231,9 +231,9 @@ unnoticed.
 
 3. **One configuration per database:**
    ```bash
-   cp stacks/stacks.conf.example stacks/nextcloud.conf
-   $EDITOR stacks/nextcloud.conf
-   chmod 600 stacks/*.conf       # may contain DB_PASSWORD
+   cp instances/instances.conf.example instances/nextcloud.conf
+   $EDITOR instances/nextcloud.conf
+   chmod 600 instances/*.conf       # may contain DB_PASSWORD
    ```
    For most stacks two lines are enough:
    ```bash
@@ -258,7 +258,7 @@ unnoticed.
 5. **Test the run** before putting it in cron:
    ```bash
    ./docker-db-dump.sh --list             # what is configured?
-   ./docker-db-dump.sh --stack nextcloud  # dump one stack (writes no marker)
+   ./docker-db-dump.sh --instance nextcloud  # dump one stack (writes no marker)
    ./docker-db-dump.sh                    # the full run
    ```
 
@@ -275,13 +275,13 @@ unnoticed.
 ```
 Usage: docker-db-dump.sh [options]
 
-  -s, --stack NAME   Dump only this stack (repeatable). A partial run NEVER
+  -s, --instance NAME   Dump only this stack (repeatable). A partial run NEVER
                      writes the completion marker.
   -l, --list         List the configured stacks and exit.
   -h, --help         Show this help and exit.
 ```
 
-`--stack` is for testing a new `stacks/<name>.conf`, not for scheduled runs: a
+`--instance` is for testing a new `instances/<name>.conf`, not for scheduled runs: a
 partial run leaves the marker alone, because it says nothing about the stacks it
 did not touch.
 
@@ -322,7 +322,7 @@ What differs from the reference repository, and why:
   anyway. `STOP_SERVICES` remains for the narrow set of cases where the dump
   method itself has no online consistency (see above).
 - **Configuration instead of a wrapper per stack.** A stack is one
-  `stacks/<name>.conf`; the wrapper-script pattern from upstream's `examples/`
+  `instances/<name>.conf`; the wrapper-script pattern from upstream's `examples/`
   is still available through `ENGINE="custom"`.
 
 
