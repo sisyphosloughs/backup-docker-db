@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# docker-db-dump.sh — script 1 of the pull-backup architecture.
+# backup-docker-db.sh — script 1 of the pull-backup architecture.
 #
 # Creates the database dumps of all configured Docker stacks LOCALLY on the
 # SOURCE host and publishes them under STAGING_DIR. It never talks to a backup
@@ -59,7 +59,7 @@ ACTION="run"
 
 usage() {
   cat <<'EOF'
-Usage: docker-db-dump.sh [options]
+Usage: backup-docker-db.sh [options]
 
 Dumps the databases of the stacks configured in instances/*.conf into STAGING_DIR
 and writes the completion marker when every one of them succeeded.

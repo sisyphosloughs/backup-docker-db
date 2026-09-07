@@ -1,6 +1,6 @@
-# global.conf — host-specific global configuration for docker-db-dump.sh
+# global.conf — host-specific global configuration for backup-docker-db.sh
 #
-# Copy to "global.conf" and adjust. Sourced by docker-db-dump.sh based on
+# Copy to "global.conf" and adjust. Sourced by backup-docker-db.sh based on
 # SCRIPT_DIR (SCRIPT_DIR is available here). Holds the switches that apply to
 # the whole run; WHICH databases are dumped is defined per stack in
 # instances/<name>.conf (see instances/stacks.conf.example).

@@ -14,23 +14,23 @@
 #
 # The generic logic (dump directory, retention, timestamps, logging, container
 # autodetection) lives in lib/db-dump-lib.sh; this script only supplies the
-# DB-specific call. docker-db-dump.sh passes the environment below, so the same
+# DB-specific call. backup-docker-db.sh passes the environment below, so the same
 # file also works standalone (./db-dump.sh) — it then falls back to the stack's
 # own db-dumps/ directory.
 
 set -euo pipefail
 
-# Set by docker-db-dump.sh. The standalone default is for a manual run; adjust
+# Set by backup-docker-db.sh. The standalone default is for a manual run; adjust
 # it to where you placed this repository.
 DB_DUMP_LIB="${DB_DUMP_LIB:-/opt/backup-docker-db/lib/db-dump-lib.sh}"
 
 # DUMP_DIR is what puts the dumps into the central staging directory
 # (STAGING_DIR/<stack>). Unset — i.e. standalone — the library falls back to
 # "$STACK_DIR/db-dumps", exactly as in the reference repository. Do NOT assign
-# it unconditionally here, or a run from docker-db-dump.sh would write past the
+# it unconditionally here, or a run from backup-docker-db.sh would write past the
 # staging directory and the backup would silently miss this stack.
 
-# How many days each dump is kept. docker-db-dump.sh passes the stack's
+# How many days each dump is kept. backup-docker-db.sh passes the stack's
 # retention; the value here only applies to a standalone run.
 # shellcheck disable=SC2034  # read by dump_prepare in the sourced library
 RETENTION_DAYS="${RETENTION_DAYS:-30}"
@@ -59,7 +59,7 @@ DB_SERVICE="mariadb"
 dump_mariadb
 
 # For anything the library does not cover, write into "$DUMP_DIR" yourself and
-# fail loudly (exit non-zero) if it does not work — docker-db-dump.sh reports
+# fail loudly (exit non-zero) if it does not work — backup-docker-db.sh reports
 # this stack as failed and then does NOT write the completion marker, which is
 # what keeps the backup side from picking up an incomplete staging directory.
 #

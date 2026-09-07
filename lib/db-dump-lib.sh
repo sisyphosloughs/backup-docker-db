@@ -15,17 +15,17 @@
 #   - creating the db-dumps/ directory,
 #   - rotating/deleting old dumps (retention),
 #   - timestamped dump filenames,
-#   - logging in restic-backup.sh's format.
+#   - logging in the run format of backup-docker-db.sh.
 #
 # The DB-specific bit (which command, which container, user/db) stays in each
 # stack's db-dump.sh, which calls the dump_* helpers below.
 #
 # Context variables — resolved with defaults so a wrapper works BOTH standalone
-# (./db-dump.sh) and when launched by restic-backup.sh:
+# (./db-dump.sh) and when launched by backup-docker-db.sh:
 #   STACK_DIR   directory of the calling db-dump.sh (the stack). Derived from the
 #               caller's path when not set in the environment.
 #   STACK_NAME  used in log messages and as the container name prefix. Defaults
-#               to the stack directory name. restic-backup.sh sets this.
+#               to the stack directory name. backup-docker-db.sh sets this.
 #   RETENTION_DAYS  days to keep dumps; set per stack in the wrapper (default 30).
 #
 # ${BASH_SOURCE[1]} is the file that sourced us (the wrapper), so STACK_DIR is the
@@ -33,13 +33,13 @@
 : "${STACK_DIR:=$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)}"
 : "${STACK_NAME:=$(basename "$STACK_DIR")}"
 # ":=" (local modification, see the header): keeps the upstream default when the
-# caller says nothing, but lets docker-db-dump.sh redirect the dumps into the
+# caller says nothing, but lets backup-docker-db.sh redirect the dumps into the
 # central STAGING_DIR. All dump_* helpers read DUMP_DIR at CALL time, so an
 # orchestrator that loops over stacks can also re-assign it per stack.
 : "${DUMP_DIR:=$STACK_DIR/db-dumps}"
 
-# Log in the same format as restic-backup.sh ("<ts> [LEVEL] msg"). No log file is
-# written here — restic-backup.sh captures this script's stdout/stderr. Logs go
+# Log in the same format as backup-docker-db.sh ("<ts> [LEVEL] msg"). No log file is
+# written here — backup-docker-db.sh captures this script's stdout/stderr. Logs go
 # to STDERR on purpose: _resolve_container returns the container id on stdout via
 # a command substitution, so its diagnostics must not pollute that channel.
 log() {

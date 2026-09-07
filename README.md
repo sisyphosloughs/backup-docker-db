@@ -26,7 +26,7 @@ be weakened anywhere — no "let's just push it directly, it's simpler".
 
 ```
 <location>/
-├── docker-db-dump.sh          # the script (identical on all hosts)
+├── backup-docker-db.sh          # the script (identical on all hosts)
 ├── global.conf                # host-specific global config (from global.conf.example)
 ├── instances/                 # one *.conf per stack whose database is dumped
 │   ├── instances.conf.example # template for a stack
@@ -219,7 +219,7 @@ unnoticed.
 1. **Place the files**, e.g. in `/opt/backup-docker-db`, and make the script
    executable:
    ```bash
-   chmod +x docker-db-dump.sh
+   chmod +x backup-docker-db.sh
    ```
 
 2. **Create the global configuration:**
@@ -257,15 +257,15 @@ unnoticed.
 
 5. **Test the run** before putting it in cron:
    ```bash
-   ./docker-db-dump.sh --list             # what is configured?
-   ./docker-db-dump.sh --instance nextcloud  # dump one stack (writes no marker)
-   ./docker-db-dump.sh                    # the full run
+   ./backup-docker-db.sh --list             # what is configured?
+   ./backup-docker-db.sh --instance nextcloud  # dump one stack (writes no marker)
+   ./backup-docker-db.sh                    # the full run
    ```
 
 6. **Schedule it**, early enough that the dumps are finished before the backup
    host pulls:
    ```cron
-   30 2 * * * /opt/backup-docker-db/docker-db-dump.sh >/dev/null 2>&1
+   30 2 * * * /opt/backup-docker-db/backup-docker-db.sh >/dev/null 2>&1
    ```
    The script logs to its own file and notifies via Telegram, so cron mail is
    not needed. It needs access to the docker socket — run it as root.
@@ -273,7 +273,7 @@ unnoticed.
 ## Manual runs
 
 ```
-Usage: docker-db-dump.sh [options]
+Usage: backup-docker-db.sh [options]
 
   -s, --instance NAME   Dump only this stack (repeatable). A partial run NEVER
                      writes the completion marker.

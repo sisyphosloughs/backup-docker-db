@@ -1,7 +1,7 @@
 # stacks/<name>.conf — one file per stack whose database is dumped
 #
 # Copy this template to stacks/<name>.conf (e.g. stacks/nextcloud.conf) and
-# adjust. docker-db-dump.sh collects every "*.conf" in this directory; this
+# adjust. backup-docker-db.sh collects every "*.conf" in this directory; this
 # ".example" file is ignored. Adding a database therefore never requires a
 # change to the script.
 #
