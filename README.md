@@ -1,4 +1,4 @@
-# docker-db-dump
+# backup-docker-db
 
 Creates the database dumps of Docker stacks **locally on the host they run on**
 and publishes them in a staging directory that a backup host pulls read-only.
@@ -40,7 +40,7 @@ be weakened anywhere — no "let's just push it directly, it's simpler".
 ```
 
 The script determines its own location at runtime; all paths derive from it, so
-the location is freely choosable (e.g. `/opt/docker-db-dump`).
+the location is freely choosable (e.g. `/opt/backup-docker-db`).
 
 
 ## The shared library
@@ -216,7 +216,7 @@ unnoticed.
 
 ## Setup
 
-1. **Place the files**, e.g. in `/opt/docker-db-dump`, and make the script
+1. **Place the files**, e.g. in `/opt/backup-docker-db`, and make the script
    executable:
    ```bash
    chmod +x docker-db-dump.sh
@@ -265,7 +265,7 @@ unnoticed.
 6. **Schedule it**, early enough that the dumps are finished before the backup
    host pulls:
    ```cron
-   30 2 * * * /opt/docker-db-dump/docker-db-dump.sh >/dev/null 2>&1
+   30 2 * * * /opt/backup-docker-db/docker-db-dump.sh >/dev/null 2>&1
    ```
    The script logs to its own file and notifies via Telegram, so cron mail is
    not needed. It needs access to the docker socket — run it as root.
@@ -300,31 +300,39 @@ monitoring wrapper evaluates. Any error (a failed dump, an unusable stack
 configuration, a service that could not be restarted) means exit `1` *and* no
 completion marker.
 
-## Relationship to restic-docker-backup
+## Relationship to the other scripts
 
-The dump logic comes from
-[restic-docker-backup](https://github.com/sisyphosloughs/restic-docker-backup)
-and is deliberately **not** reinvented: `lib/db-dump-lib.sh` is vendored from
-there, including its container autodetection, credential resolution and
-retention. Keep it in sync with upstream; the two local modifications are listed
-in its header (`DUMP_DIR` overridable, and the dump's real path in the log
-message).
+Each script of this family does one job, and they meet only through the
+directories one writes and another reads:
 
-What differs from the reference repository, and why:
+| Script | Writes | Reads |
+|---|---|---|
+| **this one** | `STAGING_DIR` + a `.complete` marker | the stacks under `STACKS_BASE` |
+| [backup-tar](https://github.com/sisyphosloughs/backup-tar) | one tar archive per path + its own marker | the paths it is configured with |
+| [backup-restic-push](https://github.com/sisyphosloughs/backup-restic-push) | snapshots in restic repositories | any directory — including this script's `STAGING_DIR` |
 
-- **Pull instead of push.** This script does not know any backup target. restic
-  runs on the backup host, against files it fetched itself.
-- **Central staging.** Dumps go to `STAGING_DIR/<stack>/` instead of
-  `<stack>/db-dumps/`, so the backup host pulls exactly one tree.
-- **No stop/start by default.** SQL dumps are already consistent. Upstream stops
-  stacks around the *backup*, which also covers their files; here the files are
-  pulled separately later, so a stop around the dump could not achieve that
-  anyway. `STOP_SERVICES` remains for the narrow set of cases where the dump
+`lib/db-dump-lib.sh` used to be vendored from the restic repository, which
+carried the authoritative copy. That copy is gone: the restic side no longer
+dumps databases at all, so the file here is now the only implementation and the
+place to change it.
+
+What this split buys, and why it is not "simpler to push directly":
+
+- **This script holds no backup credential.** It only ever creates local dumps.
+  A compromised host can neither alter existing backups nor write into the
+  backup zone.
+- **The marker is the whole contract.** `STAGING_DIR/.complete` is written
+  atomically and only after an error-free run. Whatever consumes the directory —
+  the restic push today, a pull from a backup host later — judges freshness by
+  it and needs to know nothing else about this script.
+- **Stopping containers is not this script's job.** A SQL dump is already
+  consistent; `STOP_SERVICES` remains for the narrow set of cases where the dump
   method itself has no online consistency (see above).
-- **Configuration instead of a wrapper per stack.** A stack is one
-  `instances/<name>.conf`; the wrapper-script pattern from upstream's `examples/`
-  is still available through `ENGINE="custom"`.
 
+`lib/runlib/` — the per-run log file, the error account, the lock, the
+`instances/*.conf` loader, the summary and the Telegram notification — is a git
+submodule shared by all three, so a log line means the same thing no matter
+which script produced it.
 
 ## Telegram credentials
 

@@ -3,8 +3,8 @@
 # db-dump-lib.sh — shared helpers for the per-stack db-dump.sh scripts.
 #
 # ---------------------------------------------------------------------------
-# This file used to be vendored from restic-docker-backup (now
-# backup-docker-restic), which carried the authoritative copy. That copy is
+# This file used to be vendored from the restic repository (now
+# backup-restic-push), which carried the authoritative copy. That copy is
 # gone: the restic side no longer dumps databases at all — one job per script —
 # so THIS is now the only implementation and the place to change it.
 # ---------------------------------------------------------------------------

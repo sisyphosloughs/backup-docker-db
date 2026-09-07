@@ -22,7 +22,7 @@ set -euo pipefail
 
 # Set by docker-db-dump.sh. The standalone default is for a manual run; adjust
 # it to where you placed this repository.
-DB_DUMP_LIB="${DB_DUMP_LIB:-/opt/docker-db-dump/lib/db-dump-lib.sh}"
+DB_DUMP_LIB="${DB_DUMP_LIB:-/opt/backup-docker-db/lib/db-dump-lib.sh}"
 
 # DUMP_DIR is what puts the dumps into the central staging directory
 # (STAGING_DIR/<stack>). Unset — i.e. standalone — the library falls back to
