@@ -42,6 +42,12 @@ MARKER_NAME=".complete"
 # — an older dump is the fallback if a run fails.
 DUMP_RETENTION_DAYS=7
 
+# Minimum number of dumps to keep per database, regardless of age. Without it a
+# stack that was down (or whose dump kept failing) would have all its files
+# expire on the same day and be left with nothing. A stack may override this
+# with KEEP_MIN in its own stacks/<name>.conf.
+DUMP_KEEP_MIN=2
+
 # Log retention (days). The script rotates its own logs, no logrotate needed.
 LOG_RETENTION_DAYS=64
 

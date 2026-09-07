@@ -3,20 +3,10 @@
 # db-dump-lib.sh — shared helpers for the per-stack db-dump.sh scripts.
 #
 # ---------------------------------------------------------------------------
-# VENDORED from github.com/sisyphosloughs/restic-docker-backup (lib/db-dump-lib.sh).
-# That implementation is the authoritative one and is NOT reinvented here; keep
-# this file in sync with upstream. It carries exactly TWO local modifications:
-#
-#   1. DUMP_DIR is assigned with ":=" instead of "=", so a caller may point it
-#      somewhere else BEFORE sourcing (see the DUMP_DIR line below). Unset, the
-#      result is byte-for-byte the upstream default ("$STACK_DIR/db-dumps").
-#      docker-db-dump.sh needs it because the pull architecture collects the
-#      dumps of all stacks in one central STAGING_DIR instead of inside each
-#      stack.
-#   2. _finalize_dump logs the dump's real path instead of a hardcoded
-#      "db-dumps/<file>" — which follows from (1): with a redirected DUMP_DIR
-#      that prefix would name a directory the dump is not in, and a wrong path
-#      in a backup log is exactly what costs time during a restore.
+# This file used to be vendored from restic-docker-backup (now
+# backup-docker-restic), which carried the authoritative copy. That copy is
+# gone: the restic side no longer dumps databases at all — one job per script —
+# so THIS is now the only implementation and the place to change it.
 # ---------------------------------------------------------------------------
 #
 # This is NOT a standalone program: it is meant to be "source"d from a stack's
@@ -61,12 +51,54 @@ _dump_ts() { date +%Y-%m-%dT%H-%M-%S; }
 
 dump_prepare() {
   # Create the dump directory and remove dumps older than RETENTION_DAYS so they
-  # do not pile up forever, while keeping recent ones. Call ONCE before the
-  # dump_* helpers. RETENTION_DAYS is set per stack in the wrapper (default 30).
+  # do not pile up forever. Call ONCE before the dump_* helpers. RETENTION_DAYS
+  # is set per stack in the wrapper (default 30), KEEP_MIN likewise (default 2).
+  #
+  # KEEP_MIN is the part a plain "find -mtime +N -delete" gets wrong: a database
+  # that has not been dumped for a while — a stack that was down, a dump that
+  # kept failing — would have all its files expire on the same day and leave the
+  # stack with nothing at all. The newest KEEP_MIN dumps are therefore protected
+  # regardless of age. Local retention is short anyway; the actual history lives
+  # in the backup repositories.
+  #
+  # "Newest" is decided by the timestamp IN THE FILE NAME (%Y-%m-%dT%H-%M-%S),
+  # which sorts lexically exactly as it sorts chronologically. That avoids
+  # GNU-only "find -printf" (this also has to work on a busybox host) and it
+  # survives a copy that did not preserve mtimes.
+  #
+  # The protection is per NAME PREFIX, not per directory: a stack with several
+  # SQLITE_FILES writes "db1-<ts>.sqlite3" and "db2-<ts>.sqlite3" side by side,
+  # and keeping "the newest two files" would keep two of db2 and none of db1.
+  local retention="${RETENTION_DAYS:=30}" keep="${KEEP_MIN:=2}" f removed=0
+
   mkdir -p "$DUMP_DIR" \
     || { log ERROR "${STACK_NAME}: cannot create dump directory $DUMP_DIR"; exit 1; }
-  find "$DUMP_DIR" -maxdepth 1 -type f -mtime +"${RETENTION_DAYS:=30}" -delete
-  log INFO "${STACK_NAME}: removed dumps older than ${RETENTION_DAYS} days in $DUMP_DIR"
+
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    # POSIX find on the single file: prints it only if it is older than <days>.
+    [[ -n "$(find "$f" -type f -mtime +"$retention" -print 2>/dev/null)" ]] || continue
+    rm -f "$f" && removed=$((removed + 1))
+  done < <(
+    find "$DUMP_DIR" -maxdepth 1 -type f 2>/dev/null \
+      | LC_ALL=C sort -r \
+      | awk -v keep="$keep" '
+          {
+            name = $0; sub(/.*\//, "", name)
+            group = name
+            # Strip "-<YYYY-MM-DDTHH-MM-SS>" and whatever follows it. Written out
+            # rather than with {n} intervals, which not every awk supports.
+            sub(/-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]-[0-9][0-9]-[0-9][0-9].*$/, "", group)
+            seen[group]++
+            if (seen[group] > keep) print $0
+          }'
+  )
+
+  if [[ "$removed" -gt 0 ]]; then
+    log INFO "${STACK_NAME}: removed $removed dump(s) older than ${retention} days in $DUMP_DIR (keeping at least ${keep} per database)"
+  else
+    log INFO "${STACK_NAME}: nothing to rotate in $DUMP_DIR (retention ${retention} days, keep at least ${keep} per database)"
+  fi
 }
 
 # --- container discovery & dump finalisation ---------------------------------

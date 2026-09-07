@@ -146,6 +146,7 @@ source "$GLOBAL_CONF"
 : "${STACKS_DIR:=$SCRIPT_DIR/stacks}"
 : "${MARKER_NAME:=.complete}"
 : "${DUMP_RETENTION_DAYS:=7}"
+: "${DUMP_KEEP_MIN:=2}"
 : "${LOG_RETENTION_DAYS:=64}"
 : "${STAGING_MODE:=0750}"
 : "${STAGING_GROUP:=}"
@@ -239,6 +240,7 @@ reset_stack_vars() {
   STACK_DIR="${STACKS_BASE:+${STACKS_BASE%/}/$name}"
   ENABLED="true"
   RETENTION_DAYS=""
+  KEEP_MIN=""
   DUMP_SCRIPT=""
   DB_SERVICE=""
   DB_CONTAINER=""
@@ -282,7 +284,7 @@ validate_stack() {
   STACK_ENGINES+=("$ENGINE")
   STACK_PATHS+=("$STACK_DIR")
   instances_record "${STAGING_DIR%/}/$name" "$name ($ENGINE)"
-  log_info "Stack '$name': engine $ENGINE, directory $STACK_DIR, retention ${RETENTION_DAYS:-$DUMP_RETENTION_DAYS} days"
+  log_info "Stack '$name': engine $ENGINE, directory $STACK_DIR, retention ${RETENTION_DAYS:-$DUMP_RETENTION_DAYS} days (keep at least ${KEEP_MIN:-$DUMP_KEEP_MIN})"
   return 0
 }
 
@@ -420,6 +422,7 @@ dump_one_stack() {
   STACK_DIR="$stack_dir"
   DUMP_DIR="${STAGING_DIR%/}/$name"
   RETENTION_DAYS="${RETENTION_DAYS:-$DUMP_RETENTION_DAYS}"
+  KEEP_MIN="${KEEP_MIN:-$DUMP_KEEP_MIN}"
 
   prepare_staging_dir "$DUMP_DIR" \
     || { log ERROR "${name}: cannot prepare the staging directory $DUMP_DIR"; exit 1; }
