@@ -92,8 +92,18 @@ EXTRA_PATH=""
 # EXTRA_PATH="/usr/local/bin:/volume1/opt/bin"
 
 # ---------------------------------------------------------------------------
-# Telegram notification (leave empty/"xxx" to disable)
 # ---------------------------------------------------------------------------
 
-TELEGRAM_BOT_TOKEN="xxx"
-TELEGRAM_CHAT_ID="xxx"
+# Telegram notification.
+#
+# The credentials live in ONE file for the whole host, so a token rotation is a
+# single edit instead of one per script. Create it with 0600 permissions,
+# outside every repository:
+#
+#   TELEGRAM_BOT_TOKEN="123456:AA..."
+#   TELEGRAM_CHAT_ID="987654"
+#
+# Leave both at "xxx" (or leave TELEGRAM_CONF empty) to disable notifications.
+# Setting TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID directly here still wins, so a
+# script can be moved over on its own schedule.
+TELEGRAM_CONF="/etc/runlib/telegram.conf"

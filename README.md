@@ -131,7 +131,7 @@ in the reference repository:
 | `DUMP_UMASK` | `0027` | umask for the dumps (→ files `0640`). |
 | `DOCKER_STOP_TIMEOUT` | `20` | Timeout for `docker compose stop`; only relevant with `STOP_SERVICES`. |
 | `EXTRA_PATH` | empty | Directories prepended to `PATH` (cron has a minimal one). |
-| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | `xxx` | Notification; `xxx`/empty disables it. |
+| `TELEGRAM_CONF` | empty | Path to the file holding `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` for the whole host (0600, outside every repo). Setting the two directly in `global.conf` still wins; leaving both unset disables notifications. |
 
 ### `stacks/<name>.conf` — one file per database
 
@@ -324,6 +324,31 @@ What differs from the reference repository, and why:
 - **Configuration instead of a wrapper per stack.** A stack is one
   `stacks/<name>.conf`; the wrapper-script pattern from upstream's `examples/`
   is still available through `ENGINE="custom"`.
+
+
+## Telegram credentials
+
+The token and chat id live in **one file for the whole host**, not once per
+script, so rotating them is a single edit. Point `TELEGRAM_CONF` in
+`global.conf` at it:
+
+```bash
+# global.conf
+TELEGRAM_CONF="/etc/runlib/telegram.conf"
+```
+
+```bash
+# /etc/runlib/telegram.conf   —   chmod 600, outside every repository
+TELEGRAM_BOT_TOKEN="123456:AA..."
+TELEGRAM_CHAT_ID="987654"
+```
+
+`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` set directly in `global.conf` still
+take precedence, so scripts can be moved over one at a time. Leaving both unset
+(or at `"xxx"`) disables notifications. A `TELEGRAM_CONF` that is set but
+unreadable is reported as an error rather than silently swallowed — a backup
+that has quietly stopped reporting is the failure this notification exists to
+prevent.
 
 ## Troubleshooting
 
